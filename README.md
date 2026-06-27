@@ -1,78 +1,125 @@
 # fixr ⚡
 
-AI-powered CLI that explains errors and suggests fixes — using a hashtable cache + LLM combo.
-
-## Install
+> AI-powered CLI that explains errors and suggests fixes — using a hashtable cache + LLM hybrid.
 
 ```bash
 pip install fixr
-# or
-uv add fixr
 ```
 
-## Usage
-
-```bash
-# Direct
-fixr "TypeError: unsupported operand type(s) for +: 'int' and 'str'"
-
-# Pipe any command output
-python script.py 2>&1 | fixr
-cargo build 2>&1 | fixr
-node app.js 2>&1 | fixr
-g++ main.cpp 2>&1 | fixr
-```
-
-## Setup
-
-```bash
-# Set API key
-fixr config --provider groq --api-key gsk_...
-
-# Set default provider
-fixr config --provider gemini
-
-# OAuth login (Google/Gemini)
-fixr login google
-
-# Show current config
-fixr config --show
-
-# List all providers
-fixr providers
-```
-
-## Free tier providers (no credit card)
-
-| Provider | Models |
-|---|---|
-| groq | llama-3.3-70b-versatile |
-| gemini | gemini-2.0-flash |
-| mistral | mistral-small |
-| openrouter | 20+ free models |
-| nvidia | 100+ open models |
-| cerebras | llama3.3-70b |
+---
 
 ## How it works
 
 ```
-error input
+your error
     │
     ▼
-normalize + hash (sha256[:16])
+SHA256 cache lookup ──hit──→ instant fix ⚡ (no LLM call)
+    │
+   miss
+    ▼
+LiteLLM → Groq / Gemini / Mistral / OpenAI / Anthropic / ...
     │
     ▼
-cache hit? ──yes──→ instant response ⚡
-    │
-   no
-    ▼
-LLM call (provider of choice)
-    │
-    ▼
-store in ~/.fixr/cache.json
-    │
-    ▼
-display fix
+cache result → show fix
 ```
 
-Cache lives at `~/.fixr/cache.json`. Gets smarter over time.
+Identical errors are resolved instantly from cache. The tool gets faster the more you use it.
+
+---
+
+## Usage
+
+```bash
+# Run any file — fxr captures the error automatically
+fxr script.py
+fxr main.rs
+fxr app.js
+fxr main.cpp
+fxr Main.java
+fxr main.go
+
+# Paste an error directly
+fxr "TypeError: unsupported operand type(s) for +: 'int' and 'str'"
+
+# Pipe any command
+python script.py 2>&1 | fxr
+cargo build 2>&1 | fxr
+```
+
+---
+
+## Setup
+
+```bash
+# 1. Install
+pip install fixr
+# or
+uv add fixr
+
+# 2. Run setup wizard (select provider, model, paste API key)
+fxr setup
+```
+
+Setup takes 30 seconds. Free API keys work — no credit card needed.
+
+---
+
+## Free Tier Providers
+
+| Provider | Free API | Speed |
+|---|---|---|
+| [Groq](https://console.groq.com) | ✅ | ⚡ Fastest |
+| [Gemini](https://aistudio.google.com) | ✅ | ✅ Good |
+| [Mistral](https://console.mistral.ai) | ✅ | ✅ Good |
+| [OpenRouter](https://openrouter.ai) | ✅ | ✅ Good |
+| [Cerebras](https://inference.cerebras.ai) | ✅ | ⚡ Fast |
+| Ollama | ✅ Local | Depends on hardware |
+| OpenAI | ❌ Paid | — |
+| Anthropic | ❌ Paid | — |
+
+Default: **Groq → llama-3.3-70b-versatile**
+
+---
+
+## Commands
+
+```bash
+fxr setup                              # interactive setup wizard
+fxr providers                          # list all providers + models
+fxr config --show                      # show current config
+fxr config --provider groq --api-key   # set API key
+fxr add-model <provider> <model>       # add custom model
+fxr clear-cache                        # wipe local cache
+```
+
+---
+
+## Languages Supported
+
+Python · JavaScript · TypeScript · Rust · C · C++ · Java · Go · Ruby · PHP · Bash · Lua · Perl · R · Swift · Kotlin
+
+---
+
+## Architecture
+
+```
+fixr/
+├── main.py       # Typer CLI — commands + cli() entrypoint
+├── cache.py      # SHA256 hashtable — ~/.fixr/cache.json
+├── llm.py        # LiteLLM routing — 10+ providers
+├── config.py     # Config store — ~/.fixr/config.json
+└── auth.py       # API key storage + OAuth scaffold
+```
+
+---
+
+## Stack
+
+Python · Typer · LiteLLM · Rich · Hatchling · uv
+
+---
+
+## License
+
+MIT
