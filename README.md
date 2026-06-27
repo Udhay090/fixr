@@ -14,7 +14,7 @@ pip install fixr-cli
 your error
     │
     ▼
-SHA256 cache lookup ──hit──→ instant fix ⚡ (no LLM call)
+SHA256 cache lookup ─> hit ─> instant fix ⚡ (no LLM call)
     │
    miss
     ▼
