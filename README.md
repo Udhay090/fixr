@@ -1,9 +1,9 @@
-# fixr ⚡
+# fixr-cli⚡
 
 > AI-powered CLI that explains errors and suggests fixes — using a hashtable cache + LLM hybrid.
 
 ```bash
-pip install fixr
+pip install fixr-cli
 ```
 
 ---
