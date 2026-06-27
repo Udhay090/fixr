@@ -53,7 +53,7 @@ cargo build 2>&1 | fxr
 
 ```bash
 # 1. Install
-pip install fixr
+pip install fixr-cli
 # or
 uv add fixr
 
