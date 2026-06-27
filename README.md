@@ -55,7 +55,7 @@ cargo build 2>&1 | fxr
 # 1. Install
 pip install fixr-cli
 # or
-uv add fixr
+uv add fixr-cli
 
 # 2. Run setup wizard (select provider, model, paste API key)
 fxr setup
