@@ -69,14 +69,14 @@ Setup takes 30 seconds. Free API keys work — no credit card needed.
 
 | Provider | Free API | Speed |
 |---|---|---|
-| [Groq](https://console.groq.com) | ✅ | ⚡ Fastest |
+| [Groq](https://console.groq.com) | ✅ | ⚡ Fastest (free) |
+| [Cerebras](https://inference.cerebras.ai) | ✅ | ⚡ Fast (free) |
 | [Gemini](https://aistudio.google.com) | ✅ | ✅ Good |
 | [Mistral](https://console.mistral.ai) | ✅ | ✅ Good |
 | [OpenRouter](https://openrouter.ai) | ✅ | ✅ Good |
-| [Cerebras](https://inference.cerebras.ai) | ✅ | ⚡ Fast |
 | Ollama | ✅ Local | Depends on hardware |
-| OpenAI | ❌ Paid | — |
-| Anthropic | ❌ Paid | — |
+| OpenAI | ❌ Paid | ⚡⚡ Fastest overall |
+| Anthropic | ❌ Paid | ⚡ Fast |
 
 Default: **Groq → llama-3.3-70b-versatile**
 
