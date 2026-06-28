@@ -4,6 +4,8 @@
 
 ```bash
 pip install fixr-cli
+       or
+uv install fixr-cli
 ```
 
 ---
