@@ -1,42 +1,39 @@
-import json
 import hashlib
-from pathlib import Path
-from .config import FIXR_DIR
+import json
+import re
 
-CACHE_FILE = FIXR_DIR / "cache.json"
+from . import config as cfg
 
-def _normalize(error: str) -> str:
-    """Strip line numbers and memory addresses for stable cache keys."""
-    import re
-    s = re.sub(r'line \d+', 'line N', error)
-    s = re.sub(r'0x[0-9a-fA-F]+', '0xADDR', s)
-    s = re.sub(r'\s+', ' ', s).strip().lower()
-    return s
+FILE = cfg.DIR / "cache.json"
+MAX_ENTRIES = 500
 
-def _key(error: str) -> str:
-    return hashlib.sha256(_normalize(error).encode()).hexdigest()[:16]
+
+def _key(error: str, model_id: str) -> str:
+    s = re.sub(r"(line |:)\d+", r"\1N", error, flags=re.I)  # line numbers
+    s = re.sub(r"0x[0-9a-f]+", "0xADDR", s, flags=re.I)      # memory addresses
+    s = " ".join(s.lower().split())
+    return hashlib.sha256(f"{model_id}\n{s}".encode()).hexdigest()[:16]
+
 
 def _load() -> dict:
-    FIXR_DIR.mkdir(exist_ok=True)
-    if not CACHE_FILE.exists():
-        return {}
     try:
-        return json.loads(CACHE_FILE.read_text())
-    except Exception:
+        return json.loads(FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return {}
 
-def _save(cache: dict) -> None:
-    CACHE_FILE.write_text(json.dumps(cache, indent=2))
 
-def get(error: str) -> str | None:
-    return _load().get(_key(error))
+def get(error: str, model_id: str) -> str | None:
+    return _load().get(_key(error, model_id))
 
-def set(error: str, solution: str) -> None:
-    cache = _load()
-    cache[_key(error)] = solution
-    _save(cache)
+
+def put(error: str, model_id: str, solution: str) -> None:
+    cache, k = _load(), _key(error, model_id)
+    cache.pop(k, None)  # re-insert as newest
+    cache[k] = solution
+    cfg.write_json(FILE, dict(list(cache.items())[-MAX_ENTRIES:]))
+
 
 def clear() -> int:
-    count = len(_load())
-    _save({})
-    return count
+    n = len(_load())
+    cfg.write_json(FILE, {})
+    return n

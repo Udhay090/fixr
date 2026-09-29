@@ -1,61 +1,52 @@
 import json
+import os
 from pathlib import Path
 
-FIXR_DIR = Path.home() / ".fixr"
-CONFIG_FILE = FIXR_DIR / "config.json"
+DIR = Path(os.environ.get("FIXR_HOME") or Path.home() / ".fixr")
+FILE = DIR / "config.json"
 
-DEFAULTS = {
-    "provider": "groq",
-    "model": "groq/llama-3.3-70b-versatile",
-    "api_keys": {},
-    "auth_tokens": {},
+# provider -> (OpenAI-compatible base URL, API-key env var or None, has free tier)
+PROVIDERS = {
+    "groq":       ("https://api.groq.com/openai/v1", "GROQ_API_KEY", True),
+    "cerebras":   ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", True),
+    "gemini":     ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", True),
+    "mistral":    ("https://api.mistral.ai/v1", "MISTRAL_API_KEY", True),
+    "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", True),
+    "nvidia":     ("https://integrate.api.nvidia.com/v1", "NVIDIA_NIM_API_KEY", True),
+    "ollama":     ("http://localhost:11434/v1", None, True),
+    "openai":     ("https://api.openai.com/v1", "OPENAI_API_KEY", False),
+    "anthropic":  ("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY", False),
+    "cohere":     ("https://api.cohere.ai/compatibility/v1", "COHERE_API_KEY", False),
 }
 
+
+def write_json(path: Path, data) -> None:
+    """Atomic write with owner-only permissions (files may hold API keys)."""
+    DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
 def load() -> dict:
-    FIXR_DIR.mkdir(exist_ok=True)
-    if not CONFIG_FILE.exists():
-        save(DEFAULTS.copy())
-        return DEFAULTS.copy()
-    return json.loads(CONFIG_FILE.read_text())
+    try:
+        conf = json.loads(FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        conf = {}
+    if not isinstance(conf, dict):
+        conf = {}
+    if not isinstance(conf.get("api_keys"), dict):
+        conf["api_keys"] = {}
+    return conf
 
-def save(cfg: dict) -> None:
-    FIXR_DIR.mkdir(exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
 
-def set_key(provider: str, key: str) -> None:
-    cfg = load()
-    cfg["api_keys"][provider] = key
-    save(cfg)
+def save(conf: dict) -> None:
+    write_json(FILE, conf)
+
 
 def get_key(provider: str) -> str | None:
-    cfg = load()
-    return cfg["api_keys"].get(provider)
-
-def set_default(provider: str, model: str) -> None:
-    cfg = load()
-    cfg["provider"] = provider
-    cfg["model"] = model
-    save(cfg)
-def get_models(provider: str) -> list:
-    cfg = load()
-    defaults = {
-        "groq":       ["groq/llama-3.3-70b-versatile", "groq/llama-3.1-8b-instant", "groq/mixtral-8x7b-32768"],
-        "gemini":     ["gemini/gemini-2.0-flash", "gemini/gemini-2.5-pro", "gemini/gemini-1.5-pro"],
-        "mistral":    ["mistral/mistral-small-latest", "mistral/mistral-large-latest", "mistral/codestral-latest"],
-        "openai":     ["openai/gpt-4o-mini", "openai/gpt-4o", "openai/o4-mini"],
-        "anthropic":  ["anthropic/claude-haiku-4-5-20251001", "anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"],
-        "openrouter": ["openrouter/meta-llama/llama-3.3-70b-instruct:free", "openrouter/mistralai/mistral-7b-instruct:free", "openrouter/google/gemma-3-27b-it:free"],
-        "cerebras":   ["cerebras/llama-3.3-70b", "cerebras/llama-3.1-8b", "cerebras/llama-3.1-70b"],
-        "nvidia":     ["nvidia_nim/meta/llama-3.3-70b-instruct", "nvidia_nim/mistralai/mistral-7b-instruct-v0.3", "nvidia_nim/google/gemma-3-27b-it"],
-        "ollama":     ["ollama/llama3.3", "ollama/mistral", "ollama/codellama"],
-        "cohere":     ["cohere/command-r-plus", "cohere/command-r", "cohere/command-a-03-2025"],
-    }
-    custom = cfg.get("custom_models", {}).get(provider, [])
-    return defaults.get(provider, []) + custom
-
-def add_model(provider: str, model: str) -> None:
-    cfg = load()
-    cfg.setdefault("custom_models", {}).setdefault(provider, [])
-    if model not in cfg["custom_models"][provider]:
-        cfg["custom_models"][provider].append(model)
-    save(cfg)
+    """Env var wins over the stored key."""
+    env = PROVIDERS[provider][1]
+    return (os.environ.get(env) if env else None) or load()["api_keys"].get(provider)

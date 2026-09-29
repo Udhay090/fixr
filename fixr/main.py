@@ -1,221 +1,211 @@
+import re
 import sys
-import subprocess
 from pathlib import Path
 
+import click
+import httpx
 import typer
 from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
+from rich.markup import escape
+from rich.syntax import Syntax
 
-from . import cache, llm, auth, config as cfg
-from .llm import PROVIDER_MODELS
+from . import cache, config as cfg, llm, runner
 
-app = typer.Typer(help="fixr — AI error explainer with smart caching")
+app = typer.Typer(
+    help="fixr — paste an error or a script file, get a fix. `fxr <error|file>` is shorthand for `fxr fix`.",
+    add_completion=False,
+    pretty_exceptions_show_locals=False,  # never dump locals (API keys) in a crash
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 console = Console()
 
-
-def _read_stdin() -> str | None:
-    if not sys.stdin.isatty():
-        return sys.stdin.read().strip()
-    return None
-
-def _run_fix(err: str, provider=None, model=None, no_cache=False):
-    if not no_cache:
-        cached = cache.get(err)
-        if cached:
-            _display(cached, cached=True)
-            return
-    with console.status("[cyan]Analyzing error...[/cyan]"):
-        try:
-            solution = llm.ask(err, provider=provider, model=model)
-        except ValueError as e:
-            console.print(f"[bold red]✗ Config error:[/bold red] {e}")
-            raise typer.Exit(1)
-        except Exception as e:
-            console.print(f"[bold red]✗ LLM error:[/bold red] {e}")
-            raise typer.Exit(1)
+COMMANDS = {"fix", "config", "providers", "models", "clear-cache", "setup"}
+SECTIONS = ("ERROR TYPE", "SEVERITY", "EXPLANATION", "ROOT CAUSE", "FIX", "PREVENTION")
+HEADER = re.compile(rf"^({'|'.join(SECTIONS)}):[ \t]*", re.M)
+INLINE = {"ERROR TYPE": "bold red", "SEVERITY": "bold yellow"}
+NETWORK_ERRORS = (ValueError, RuntimeError, httpx.HTTPError)
 
 
-def _display(solution: str, cached: bool = False):
-    from rich.syntax import Syntax
-    from rich.rule import Rule
-    import re
+def fail(msg: str):
+    console.print(f"[bold red]✗[/bold red] {escape(msg)}")
+    raise typer.Exit(1)
 
-    title = "[green]fixr ⚡ cached[/green]" if cached else "[cyan]fixr[/cyan]"
+
+def _describe(e: Exception) -> str:
+    return f"{type(e).__name__}: {e}" if isinstance(e, httpx.HTTPError) else str(e)
+
+
+def _display(text: str, cached: bool = False) -> None:
+    parts = HEADER.split(text)  # [preamble, name, body, name, body, ...]
     console.print()
-    console.rule(f"[bold]{title}[/bold]")
-
-    # Extract and style each section
-    sections = {
-        "ERROR TYPE": "bold red",
-        "SEVERITY": "bold yellow",
-        "EXPLANATION": "white",
-        "ROOT CAUSE": "bold white",
-        "FIX": None,  # handled separately for code
-        "PREVENTION": "green",
-    }
-
-    current = solution
-    for section, style in sections.items():
-        pattern = rf"{section}:\n?(.*?)(?=\n[A-Z ]+:|$)"
-        match = re.search(pattern, current, re.DOTALL)
-        if not match:
+    console.rule("[green]fixr ⚡ cached[/green]" if cached else "[cyan]fixr[/cyan]")
+    if len(parts) < 3:  # model ignored the format — show it raw instead of nothing
+        console.print(escape(text))
+    for name, body in zip(parts[1::2], parts[2::2]):
+        body = body.strip()
+        if name in INLINE:
+            console.print(f"[{INLINE[name]}]{name}:[/] {escape(body)}")
             continue
-        content = match.group(1).strip()
-
-        if section == "FIX":
-            console.print(f"\n[bold cyan]● FIX[/bold cyan]")
-            # extract code block
-            code_match = re.search(r"```(?:\w+)?\n?(.*?)```", content, re.DOTALL)
-            if code_match:
-                code = code_match.group(1).strip()
-                syntax = Syntax(code, "python", theme="dracula", line_numbers=True)
-                console.print(syntax)
-            else:
-                console.print(content)
-        elif section in ("ERROR TYPE", "SEVERITY"):
-            console.print(f"[{style}]{section}:[/{style}] {content}")
+        console.print(f"\n[bold cyan]● {name}[/bold cyan]")
+        code = re.search(r"```(\w*)\n(.*?)```", body, re.S) if name == "FIX" else None
+        if code:
+            console.print(Syntax(code[2].strip(), code[1] or "text", theme="dracula", line_numbers=True))
         else:
-            console.print(f"\n[bold cyan]● {section}[/bold cyan]")
-            console.print(f"[{style}]{content}[/{style}]")
-
+            console.print(escape(body), style="green" if name == "PREVENTION" else "")
     console.rule()
     console.print()
 
-@app.callback(invoke_without_command=True)
-def main(ctx: typer.Context):
-    """fixr — paste an error or a script file, get a fix."""
-    if ctx.invoked_subcommand is not None:
-        return
 
-    stdin_error = _read_stdin()
-    if stdin_error:
-        _run_fix(stdin_error)
-        return
-    console.print("[yellow]Usage: fxr 'error message'  or  fxr script.py[/yellow]")
+def _target(provider: str, model: str) -> tuple[str, str]:
+    conf = cfg.load()
+    default = conf.get("provider")
+    provider = provider or default
+    if not provider:
+        fail("Not configured. Run: fxr setup")
+    if provider not in cfg.PROVIDERS:
+        fail(f"Unknown provider '{provider}'. Run: fxr providers")
+    model = model or (conf.get("model") if provider == default else None)
+    if not model:
+        fail(f"No model set for {provider}. See: fxr models -p {provider}, then pass -m MODEL")
+    return provider, model
 
-@app.command(name="fix", help="Explain an error and suggest a fix.")
+
+def _is_file(s: str) -> bool:
+    try:
+        return "\n" not in s and len(s) < 260 and Path(s).is_file()
+    except (OSError, ValueError):
+        return False
+
+
+@app.command(help="Explain an error (text, stdin, or a script file) and suggest a fix.")
 def fix(
-    error: str = typer.Argument(None, help="Error string to analyze"),
+    error: str = typer.Argument(None, help="Error text or path to a script to run"),
     provider: str = typer.Option(None, "--provider", "-p", help="LLM provider"),
-    model: str = typer.Option(None, "--model", "-m", help="Model string"),
+    model: str = typer.Option(None, "--model", "-m", help="Model id"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Skip cache lookup"),
 ):
-    stdin_error = _read_stdin()
-    err = stdin_error or error
-    if not err:
-        err = typer.prompt("Paste your error")
-    _run_fix(err, provider=provider, model=model, no_cache=no_cache)
+    text = error
+    if text is None:
+        text = sys.stdin.read() if not sys.stdin.isatty() else typer.prompt("Paste your error")
+    text = text.strip()
+    if not text:
+        fail("Nothing to analyze.")
+
+    if _is_file(text):
+        try:
+            text = runner.run_file(Path(text))
+        except runner.RunnerError as e:
+            fail(str(e))
+        if text is None:
+            console.print("[green]✓ Script ran without errors.[/green]")
+            return
+
+    provider, model = _target(provider, model)
+    model_id = f"{provider}/{model}"
+    if not no_cache and (hit := cache.get(text, model_id)):
+        return _display(hit, cached=True)
+
+    try:
+        with console.status("[cyan]Analyzing...[/cyan]"):
+            solution = llm.ask(text, provider, model)
+    except NETWORK_ERRORS as e:
+        fail(_describe(e))
+    if not solution:
+        fail("The model returned an empty response. Try another model: fxr models")
+    cache.put(text, model_id, solution)
+    _display(solution)
 
 
 @app.command()
 def config(
     provider: str = typer.Option(None, "--provider", "-p", help="Set default provider"),
     model: str = typer.Option(None, "--model", "-m", help="Set default model"),
-    api_key: str = typer.Option(None, "--api-key", "-k", help="Set API key for provider"),
+    api_key: str = typer.Option(None, "--api-key", "-k", help="Set API key (for --provider, or the default)"),
     show: bool = typer.Option(False, "--show", help="Show current config"),
 ):
     """Configure default provider, model, and API keys."""
+    conf = cfg.load()
     if show:
-        c = cfg.load()
-        keys = {k: v[:8] + "..." for k, v in c.get("api_keys", {}).items() if v}
-        console.print(Panel(
-            f"Provider: [cyan]{c.get('provider')}[/cyan]\n"
-            f"Model:    [cyan]{c.get('model')}[/cyan]\n"
-            f"Keys:     {keys}",
-            title="fixr config"
-        ))
+        keys = {p: "…" + k[-4:] for p, k in conf["api_keys"].items() if k}
+        console.print(f"Provider: [cyan]{conf.get('provider')}[/cyan]\nModel:    [cyan]{conf.get('model')}[/cyan]\nKeys:     {keys}")
         return
-    if api_key and provider:
-        auth.set_api_key(provider, api_key)
-        console.print(f"[green]✓[/green] API key saved for [cyan]{provider}[/cyan]")
-    if provider or model:
-        p = provider or cfg.load().get("provider", "groq")
-        m = model or PROVIDER_MODELS.get(p, "groq/llama-3.3-70b-versatile")
-        cfg.set_default(p, m)
-        console.print(f"[green]✓[/green] Default set to [cyan]{p}[/cyan] / [cyan]{m}[/cyan]")
-
-
-@app.command()
-def login(
-    provider: str = typer.Argument(..., help="Provider to OAuth login (e.g. google)"),
-):
-    """Login via OAuth (browser-based). Currently supports: google."""
-    try:
-        url = auth.oauth_login(provider)
-        console.print(f"[cyan]Browser opened.[/cyan] If not, visit:\n{url}")
-        code = typer.prompt("Paste the auth code here")
-        auth.save_oauth_token(provider, code)
-        console.print(f"[green]✓[/green] Token saved for [cyan]{provider}[/cyan]")
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        raise typer.Exit(1)
+    target = provider or conf.get("provider")
+    if target not in cfg.PROVIDERS:
+        fail("Give a valid --provider (see: fxr providers)")
+    if api_key:
+        conf["api_keys"][target] = api_key
+    if provider:
+        if provider != conf.get("provider") and not model:
+            conf.pop("model", None)  # old model belongs to the old provider
+        conf["provider"] = provider
+    if model:
+        conf["model"] = model
+    cfg.save(conf)
+    console.print(f"[green]✓[/green] Saved. Default: {conf.get('provider')} / {conf.get('model')}")
 
 
 @app.command()
 def providers():
-    """List all supported providers and their default models."""
-    console.print("\n[bold]Supported Providers[/bold]\n")
-    free = {"groq", "gemini", "mistral", "openrouter", "nvidia", "cerebras"}
-    for p, m in PROVIDER_MODELS.items():
-        tier = "[green]free tier[/green]" if p in free else "[yellow]paid[/yellow]"
-        console.print(f"  [cyan]{p:<12}[/cyan] {tier:<20} {m}")
-    console.print()
+    """List supported providers (✓ = ready to use)."""
+    for p, (_, env, free) in cfg.PROVIDERS.items():
+        ready = "✓" if cfg.get_key(p) or not env else " "
+        console.print(f"  {ready} [cyan]{p:<11}[/cyan] {'free tier' if free else 'paid'}")
 
 
 @app.command()
+def models(provider: str = typer.Option(None, "--provider", "-p", help="Provider (default: current)")):
+    """List the models a provider currently serves (live from its API)."""
+    provider = provider or cfg.load().get("provider")
+    if provider not in cfg.PROVIDERS:
+        fail("Give a valid --provider (see: fxr providers)")
+    try:
+        for m in llm.list_models(provider):
+            console.print(m, markup=False, highlight=False)
+    except NETWORK_ERRORS as e:
+        fail(_describe(e))
+
+
+@app.command(name="clear-cache")
 def clear_cache():
     """Clear the local error cache."""
-    n = cache.clear()
-    console.print(f"[green]✓[/green] Cleared {n} cached entries.")
+    console.print(f"[green]✓[/green] Cleared {cache.clear()} cached entries.")
+
+
+def _pick(label: str, options: list) -> str:
+    for i, o in enumerate(options, 1):
+        console.print(f"  {i}. {o}", markup=False, highlight=False)
+    return options[typer.prompt(label, type=click.IntRange(1, len(options)), default=1) - 1]
 
 
 @app.command()
 def setup():
-    """Interactive setup wizard."""
-    console.print("\n[bold cyan]fxr setup[/bold cyan]\n")
+    """Interactive setup: provider → API key → model (fetched live)."""
+    provider = _pick("Provider", list(cfg.PROVIDERS))
+    conf = cfg.load()
+    if cfg.PROVIDERS[provider][1]:
+        key = typer.prompt(f"{provider} API key (blank = keep current / use env var)",
+                           hide_input=True, default="", show_default=False).strip()
+        if key:
+            conf["api_keys"][provider] = key
+    conf["provider"] = provider
+    conf.pop("model", None)
+    cfg.save(conf)  # saved first so the model lookup can use the key
 
-    providers_list = list(PROVIDER_MODELS.keys())
-    free = {"groq", "gemini", "mistral", "openrouter", "cerebras", "ollama", "nvidia"}
-    for i, p in enumerate(providers_list):
-        tier = "[green]free[/green]" if p in free else "[yellow]paid[/yellow]"
-        console.print(f"  {i+1}. {p} ({tier})")
+    try:
+        available = llm.list_models(provider)
+    except NETWORK_ERRORS as e:
+        console.print(f"[yellow]Couldn't fetch models: {escape(_describe(e))}[/yellow]")
+        available = []
+    if len(available) > 25:
+        q = typer.prompt("Filter models (text; blank = first 25)", default="", show_default=False).lower()
+        available = [m for m in available if q in m.lower()][:25]
+    conf["model"] = _pick("Model", available) if available else typer.prompt("Model id")
+    cfg.save(conf)
+    console.print(f"[green]✓[/green] Ready: {provider} / {conf['model']}. Try: fxr script.py")
 
-    choice = typer.prompt("\nSelect provider number", default="1")
-    provider = providers_list[int(choice) - 1]
-
-    models = cfg.get_models(provider)
-    console.print(f"\n[bold]Models for {provider}:[/bold]")
-    for i, m in enumerate(models):
-        console.print(f"  {i+1}. {m}")
-    console.print(f"  {len(models)+1}. Enter custom model")
-
-    mchoice = typer.prompt("Select model number", default="1")
-    midx = int(mchoice) - 1
-    if midx == len(models):
-        model = typer.prompt("Enter model string")
-        cfg.add_model(provider, model)
-    else:
-        model = models[midx]
-
-    api_key = typer.prompt(f"\nPaste your {provider} API key", hide_input=True)
-    auth.set_api_key(provider, api_key)
-    cfg.set_default(provider, model)
-    console.print(f"\n[green]✓[/green] Config saved — {provider} / {model}")
-    console.print("\n[bold #50fa7b]✓ Setup complete! Run: fxr \"your error\" or fxr script.py[/bold #50fa7b]")
-
-
-@app.command(name="add-model")
-def add_model_cmd(
-    provider: str = typer.Argument(..., help="Provider name"),
-    model: str = typer.Argument(..., help="Model string"),
-):
-    """Add a custom model to a provider's list."""
-    cfg.add_model(provider, model)
-    console.print(f"[green]✓[/green] Added [cyan]{model}[/cyan] to [cyan]{provider}[/cyan]")
 
 def cli():
-    known = {"fix", "config", "login", "providers", "clear-cache", "setup", "add-model", "--help", "-h"}
-    if len(sys.argv) > 1 and sys.argv[1] not in known and not sys.argv[1].startswith("--"):
+    # Bare `fxr <error|file>` and `fxr -p groq "..."` → `fxr fix ...`
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS | {"-h", "--help"}:
         sys.argv.insert(1, "fix")
     app()
