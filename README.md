@@ -1,4 +1,4 @@
-# fixr ⚡
+# fixr-cli ⚡
 
 > AI-powered CLI that explains errors and suggests fixes — using a hashtable cache + LLM hybrid.
 
